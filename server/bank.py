@@ -44,9 +44,7 @@ def create_client_id() -> str:
 def add_one_month(dt, day_of_month):
     year = dt.year + (dt.month // 12)
     month = (dt.month % 12) + 1
-    # Find the last valid day of the target month
     max_day = calendar.monthrange(year, month)[1]
-    # day_of_month is the standing order's own day, so Jan 31 -> Feb 28 -> Mar 31
     day = min(day_of_month, max_day)
     return dt.replace(year=year, month=month, day=day)
 
@@ -67,7 +65,6 @@ class Bank:
         self.actions: Dict[ActionId, Action] = {}
         self.clients: Dict[ClientId, Client] = {}
         self.future_actions: Dict[date, Set[ActionId]] = defaultdict(set)
-        # the last day do_today ran, so every day runs exactly once
         self.last_day_done: date = start_date
 
     def now(self) -> datetime:
@@ -77,7 +74,6 @@ class Bank:
         print(f"Bank date: {self.clock.today()} (press Enter for the next day)", flush=True)
 
     def register_client(self, name: str, password: str) -> ClientId:
-        # name: 3-20 letters, digits or _, password: at least 4 characters. "" means rejected
         if re.fullmatch(r"[A-Za-z0-9_]{3,20}", name) is None or len(password) < 4:
             return ""
         new_client_id: ClientId = create_client_id()
@@ -102,7 +98,6 @@ class Bank:
         return Bank.LoginResult.SUCCESS
 
     def get_past_actions(self, client_id: ClientId) -> PastActions:
-        # TODO what if client_id does not exist
         client = self.clients[client_id]
         return Bank.PastActions(
             incoming_actions={self.actions[action_id] for action_id in client.incoming_actions},
@@ -161,7 +156,6 @@ class Bank:
                             created_by_action=None, amount=amount)
         self.actions[new_loan_id] = new_loan
         if self.do_action(new_loan_id):
-            # the id of the scheduled repayment, which is the id the active loans list shows
             return new_loan._return_loan_id
         return ""
 
@@ -185,7 +179,6 @@ class Bank:
         if standing_order_id not in client.active_actions:
             return False
 
-        # the next payment is scheduled in future_actions and was created by the active standing order
         for action_ids in self.future_actions.values():
             for action_id in action_ids:
                 next_payment = self.actions[action_id]
@@ -196,8 +189,6 @@ class Bank:
         return False
 
     def do_today(self):
-        #TODO: return statuses for all actions
-        # run every day since the last run, each day once (none if the date didn't change)
         while self.last_day_done < self.clock.today():
             self.last_day_done += timedelta(days=1)
             for client in self.clients.values():
@@ -325,6 +316,8 @@ class Transfer(Action):
     def do(self, bank: Bank) -> Action.ActionResult:
         if self._to_client not in bank.clients:
             return Action.ActionResult.failed_action()
+        if self._to_client == self._created_by_client:
+            return Action.ActionResult.failed_action()
         from_client = bank.clients[self._created_by_client]
         to_client = bank.clients[self._to_client]
         if self._amount <= 0:
@@ -356,7 +349,6 @@ class TakeLoan(Action):
         client = bank.clients[self._created_by_client]
         if self._amount <= 0:
             return Action.ActionResult.failed_action()
-        # cant take loan with minus
         if client.balance < 0:
             return Action.ActionResult.failed_action()
         client.incoming_actions.add(self.action_id)
@@ -367,7 +359,7 @@ class TakeLoan(Action):
             date_created=bank.clock.today(),
             created_by_client=self._created_by_client,
             created_by_action=self.action_id,
-            amount=self._amount * 1.05  # 5% interest
+            amount=self._amount * 1.05
         )
         client.active_actions.add(return_loan_action.action_id)
         self._return_loan_id = return_loan_action.action_id
@@ -396,11 +388,12 @@ class StandingOrder(Transfer):
     ):
         super().__init__(action_id, date_created, created_by_client, amount, created_by_action, to_client)
         self._number_of_payments = number_of_payments
-        # the day of the month the payments are made on (the day the standing order was created)
         self._day_of_month = day_of_month if day_of_month is not None else date_created.day
 
     def do(self, bank: Bank) -> Action.ActionResult:
         if self._to_client not in bank.clients:
+            return Action.ActionResult.failed_action()
+        if self._to_client == self._created_by_client:
             return Action.ActionResult.failed_action()
         from_client = bank.clients[self._created_by_client]
         to_client = bank.clients[self._to_client]
@@ -413,7 +406,6 @@ class StandingOrder(Transfer):
         from_client.outgoing_actions.add(self.action_id)
         to_client.incoming_actions.add(self.action_id)
         new_number_of_payments = self._number_of_payments - 1 if self._number_of_payments is not None else None
-        # the previous payment is no longer the active one (the first payment has no previous one)
         if self._created_by_action is not None:
             from_client.active_actions.remove(self._created_by_action)
         self._done_at = bank.now()

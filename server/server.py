@@ -53,7 +53,6 @@ class ProtocolCodex:
             try:
                 return ProtocolCodex.ReadResult(read_value=cls(action_value), bytes_read=1)
             except ValueError:
-                # unknown action type
                 return None
 
         def to_bytes(self) -> bytes:
@@ -138,8 +137,6 @@ class ProtocolCodex:
 
     @staticmethod
     def read_action(data: bytes) -> Optional[ReadResult[tuple]]:
-        # an action is 7 strings (id, type, date, from client, from name, to client, to name)
-        # and a float (amount)
         fields = []
         bytes_read = 0
         for _ in range(7):
@@ -201,9 +198,7 @@ class ProtocolImplementer:
         self.received_bytes = b''
         self.bytes_to_send = b''
         self.bank = bank
-        # set by a successful login; every request except register and login needs it
         self.client_id: Optional[str] = None
-        # tells the server to close this connection (logout, or a request before login)
         self.should_close: bool = False
 
     def handle_register(self):
@@ -244,7 +239,6 @@ class ProtocolImplementer:
 
         self.bytes_to_send += ProtocolCodex.write_unsigned_int(login_result.value)
         if self.client_id is not None:
-            # on success the client also gets the account name
             self.bytes_to_send += ProtocolCodex.write_string(self.bank.get_name(self.client_id))
         self.received_bytes = self.received_bytes[1+client_id_read_result.bytes_read+password_read_result.bytes_read:]
         return True
@@ -297,7 +291,6 @@ class ProtocolImplementer:
         if number_of_payments is None:
             return False
 
-        # the new standing order's id, "" if it failed
         created_standing_order_id = self.bank.create_standing_order(
             from_client_id=self.client_id,
             to_client_id=to_client_id_read_result.read_value,
@@ -323,7 +316,6 @@ class ProtocolImplementer:
         loan_amount = ProtocolCodex.read_float(self.received_bytes[1:])
         if loan_amount is None:
             return False
-        # the new loan's id, "" if it failed
         loan_id = self.bank.loan(client_id=self.client_id,
                                  amount=loan_amount.read_value)
         self.bytes_to_send += ProtocolCodex.write_string(loan_id)
@@ -342,10 +334,8 @@ class ProtocolImplementer:
         active_actions = self.bank.get_active_actions(client_id=self.client_id)
         active_standing_orders = sorted([action for action in active_actions if isinstance(action, StandingOrder)],
                                         key=lambda action: action._done_at, reverse=True)
-        # like write_actions, but each standing order also has the payments left and the next payment date
         standing_orders_bytes = ProtocolCodex.write_unsigned_int(len(active_standing_orders))
         for standing_order in active_standing_orders:
-            # -1 means until cancelled
             remaining = standing_order._number_of_payments - 1 if standing_order._number_of_payments is not None else -1
             next_payment_date = add_one_month(standing_order._done_at.date(), standing_order._day_of_month)
             standing_orders_bytes += (ProtocolCodex.write_action(standing_order, self.bank) +
@@ -357,7 +347,6 @@ class ProtocolImplementer:
 
     def handle_show_active_loans(self):
         active_actions = self.bank.get_active_actions(client_id=self.client_id)
-        # a loan was taken when the TakeLoan action that created its ReturnLoan was done
         active_loans = sorted([action for action in active_actions if isinstance(action, ReturnLoan)],
                               key=lambda loan: self.bank.actions[loan._created_by_action]._done_at, reverse=True)
         self.bytes_to_send += ProtocolCodex.write_actions(active_loans, self.bank)
@@ -382,13 +371,11 @@ class ProtocolImplementer:
         handled: bool = True
         while len(self.received_bytes) > 0 and not self.should_close:
             action_result = ProtocolCodex.ActionType.from_bytes(self.received_bytes)
-            # the loop makes sure there is at least 1 byte, so None means an unknown action type
             if action_result is None:
                 self.should_close = True
                 return
             action_type = action_result.read_value
 
-            # only register and login are allowed before the client logs in
             if action_type not in (ProtocolCodex.ActionType.REGISTER, ProtocolCodex.ActionType.LOGIN) \
                     and self.client_id is None:
                 self.should_close = True
@@ -467,7 +454,6 @@ class Server:
                     try:
                         protocols[connection].handle_received_bytes(data)
                     except Exception:
-                        # a request the server couldn't handle: drop only this client, keep the server running
                         self.close_connection(connection, protocols)
                         continue
                     if protocols[connection].should_close:
@@ -485,7 +471,6 @@ class Server:
                     if connection in protocols:
                         self.close_connection(connection, protocols)
                 self.console.poll(self.on_console_line)
-                # runs the days that passed (nothing if the date didn't change)
                 self.bank.do_today()
 
     def close_connection(self, connection: socket.socket, protocols: Dict[socket.socket, ProtocolImplementer]):

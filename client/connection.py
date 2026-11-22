@@ -40,10 +40,6 @@ class ProtocolError(Exception):
 class RequestFailed(Exception):
     """The server rejected the request. ``str(self)`` is safe to show to the user."""
 
-
-# Same class as ProtocolCodex in server/server.py (the client and the server are separate
-# programs, so each has its own copy). Only write_action/write_actions are left out: they are
-# server-only. Keep the two copies identical.
 class ProtocolCodex:
     @dataclass
     class ReadResult[T]:
@@ -74,7 +70,6 @@ class ProtocolCodex:
             try:
                 return ProtocolCodex.ReadResult(read_value=cls(action_value), bytes_read=1)
             except ValueError:
-                # unknown action type
                 return None
 
         def to_bytes(self) -> bytes:
@@ -159,8 +154,6 @@ class ProtocolCodex:
 
     @staticmethod
     def read_action(data: bytes) -> Optional[ReadResult[tuple]]:
-        # an action is 7 strings (id, type, date, from client, from name, to client, to name)
-        # and a float (amount)
         fields = []
         bytes_read = 0
         for _ in range(7):
@@ -208,13 +201,11 @@ class Connection:
     def __init__(self):
         self.sock: Optional[socket.socket] = None
         self.received_bytes = b''
-        # the logged-in client, used to tell incoming from outgoing transfers in the history
         self.client_id: Optional[str] = None
 
     @property
     def connected(self) -> bool:
         """Returns True if a TCP connection to the server is currently open."""
-        # a closed socket has fileno -1
         return self.sock is not None and self.sock.fileno() != -1
 
     def connect(self, host: str, port: int) -> None:
@@ -246,15 +237,12 @@ class Connection:
         Returns:
             None.
         """
-        # the closed socket object is kept, so a request after close raises OSError
-        # (which the GUI handles) instead of failing on None
         if self.sock is not None:
             self.sock.close()
         self.received_bytes = b''
         self.client_id = None
 
     def receive(self, read_function: Callable):
-        """Receive until read_function (a ProtocolCodex reader) can read a whole value, and return it."""
         result = read_function(self.received_bytes)
         while result is None:
             data = self.sock.recv(4096)
@@ -283,7 +271,6 @@ class Connection:
                           ProtocolCodex.write_string(user) +
                           ProtocolCodex.write_string(password))
         client_id = self.receive(ProtocolCodex.read_string)
-        # the server sends "" when the name or password breaks the rules
         if client_id == "":
             raise RequestFailed("The name must be 3-20 letters, digits or _ "
                                 "and the password at least 4 characters")
@@ -306,7 +293,6 @@ class Connection:
         self.sock.sendall(ProtocolCodex.ActionType.LOGIN.to_bytes() +
                           ProtocolCodex.write_string(token) +
                           ProtocolCodex.write_string(password))
-        # Bank.LoginResult on the server: 0 = success, 1 = wrong password, 2 = unknown client id
         login_result = self.receive(ProtocolCodex.read_unsigned_int)
         if login_result == 1:
             raise RequestFailed("Wrong password")
@@ -354,7 +340,6 @@ class Connection:
             RequestFailed: invalid amount or not logged in.
             ConnectionError: connection lost.
         """
-        # the GUI passes the text the user typed; a ValueError would stop the GUI's network thread
         try:
             amount_value = float(amount)
         except ValueError:
@@ -437,7 +422,6 @@ class Connection:
                           ProtocolCodex.write_string(target) +
                           ProtocolCodex.write_float(amount_value) +
                           ProtocolCodex.write_int(count_value))
-        # the new standing order's id, "" if it failed
         standing_order_id = self.receive(ProtocolCodex.read_string)
         if standing_order_id == "":
             raise RequestFailed("Standing order failed")
@@ -465,8 +449,6 @@ class Connection:
             ConnectionError: connection lost.
         """
         self.sock.sendall(ProtocolCodex.ActionType.SHOW_ACTIVE_STANDING_ORDERS.to_bytes())
-        # each standing order is an action, then the payments left (-1 = until cancelled)
-        # and the next payment date
         number_of_standing_orders = self.receive(ProtocolCodex.read_unsigned_int)
         standing_orders = []
         for _ in range(number_of_standing_orders):
@@ -474,7 +456,6 @@ class Connection:
                 self.receive(ProtocolCodex.read_action)
             remaining = self.receive(ProtocolCodex.read_int)
             next_payment_date = self.receive(ProtocolCodex.read_string)
-            # the number of payments already made isn't stored on the server
             standing_orders.append((action_id, to_client, to_name, f"{amount:.2f}", "-",
                                     None if remaining == -1 else remaining, next_payment_date))
         return standing_orders
@@ -517,7 +498,6 @@ class Connection:
             raise RequestFailed("Amount must be a number") from None
         self.sock.sendall(ProtocolCodex.ActionType.LOAN.to_bytes() +
                           ProtocolCodex.write_float(amount_value))
-        # the new loan's id, "" if it was refused
         loan_id = self.receive(ProtocolCodex.read_string)
         if loan_id == "":
             raise RequestFailed("Loan refused")
@@ -543,7 +523,6 @@ class Connection:
         """
         self.sock.sendall(ProtocolCodex.ActionType.SHOW_ACTIVE_LOANS.to_bytes())
         loans = self.receive(ProtocolCodex.read_actions)
-        # each unpaid loan is its pending repayment: amount = principal * 1.05, date = the day it was taken
         return [(action_id, f"{amount / 1.05:.2f}", f"{amount:.2f}", taken_on,
                  (date.fromisoformat(taken_on) + timedelta(days=30)).isoformat())
                 for action_id, action_type, taken_on, from_client, from_name, to_client, to_name, amount in loans]
@@ -578,10 +557,7 @@ class Connection:
         past_actions = self.receive(ProtocolCodex.read_actions)
 
         history = []
-        # every change to the balance is in the history, so the balance after each entry
-        # is the sum of the amounts up to it
         balance = 0.0
-        # the server sends newest first, the GUI wants oldest first
         for action_id, action_type, action_time, from_client, from_name, to_client, to_name, amount \
                 in reversed(past_actions):
             outgoing = from_client == self.client_id
@@ -611,7 +587,6 @@ class Connection:
                 case _:
                     raise ProtocolError(f"unknown action type {action_type!r}")
             balance += signed_amount
-            # "2026-01-31T14:13:20.123456" -> "2026-01-31 14:13:20"
             time_text = action_time.replace("T", " ")[:19]
             history.append((time_text, tx_type, counterparty, counterparty_name,
                             f"{signed_amount:.2f}", f"{balance:.2f}", ""))
